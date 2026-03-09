@@ -240,18 +240,24 @@ export default function (pi: ExtensionAPI) {
       const toolResultCount = event.toolResults?.length ?? 0;
       turnSpan.setAttribute("turn.tool_results", toolResultCount);
 
-      // Extract token usage from the assistant message if available
+      // Extract token usage from the assistant message
+      // AssistantMessage has .usage with { input, output, cacheRead, cacheWrite, totalTokens }
       const msg = event.message as any;
-      if (msg?.usage) {
-        const inputTokens = msg.usage.inputTokens ?? 0;
-        const outputTokens = msg.usage.outputTokens ?? 0;
+      if (msg?.role === "assistant" && msg?.usage) {
+        const inputTokens = msg.usage.input ?? 0;
+        const outputTokens = msg.usage.output ?? 0;
+        const cacheRead = msg.usage.cacheRead ?? 0;
+        const cacheWrite = msg.usage.cacheWrite ?? 0;
         turnSpan.setAttribute("llm.usage.input_tokens", inputTokens);
         turnSpan.setAttribute("llm.usage.output_tokens", outputTokens);
-        totalTokensIn += inputTokens;
+        turnSpan.setAttribute("llm.usage.cache_read_tokens", cacheRead);
+        turnSpan.setAttribute("llm.usage.cache_write_tokens", cacheWrite);
+        turnSpan.setAttribute("llm.usage.total_tokens", msg.usage.totalTokens ?? 0);
+        totalTokensIn += inputTokens + cacheRead + cacheWrite;
         totalTokensOut += outputTokens;
 
         // Record token metrics
-        tokensInputCounter.add(inputTokens, { "llm.model": currentModel });
+        tokensInputCounter.add(inputTokens + cacheRead + cacheWrite, { "llm.model": currentModel });
         tokensOutputCounter.add(outputTokens, { "llm.model": currentModel });
       }
 
