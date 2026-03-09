@@ -50,6 +50,7 @@ export default function (pi: ExtensionAPI) {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
   const serviceName = process.env.OTEL_SERVICE_NAME || "pi-coding-agent";
   const metricInterval = parseInt(process.env.OTEL_METRIC_EXPORT_INTERVAL || "10000", 10);
+  const metricsEndpoint = process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT || `${endpoint}/v1/metrics`;
 
   // --- Resource setup (shared by traces & metrics) ---
   const resourceAttrs: Record<string, string> = {
@@ -84,7 +85,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Metric provider ---
   const metricReader = new PeriodicExportingMetricReader({
-    exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
+    exporter: new OTLPMetricExporter({ url: metricsEndpoint }),
     exportIntervalMillis: metricInterval,
   });
 
