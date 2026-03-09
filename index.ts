@@ -79,9 +79,11 @@ export default function (pi: ExtensionAPI) {
   if (debug) {
     traceProvider.addSpanProcessor(new BatchSpanProcessor(new ConsoleSpanExporter()));
   }
-  traceProvider.register();
-
-  const tracer: Tracer = trace.getTracer("pi-otel-extension", "1.0.0");
+  // Don't use traceProvider.register() — it sets the global provider which
+  // can only be done once per process. On /reload the extension re-runs but
+  // the global is already set, so the new provider's spans wouldn't export.
+  // Instead, get the tracer directly from this provider instance.
+  const tracer: Tracer = traceProvider.getTracer("pi-otel-extension", "1.0.0");
 
   // --- Metric provider ---
   const metricReader = new PeriodicExportingMetricReader({
