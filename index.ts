@@ -172,7 +172,7 @@ export default function (pi: ExtensionAPI) {
     // Record session duration metric
     if (sessionStartTime > 0) {
       const durationSec = (Date.now() - sessionStartTime) / 1000;
-      sessionDurationHistogram.record(durationSec, { "llm.model": currentModel });
+      sessionDurationHistogram.record(durationSec);
     }
 
     if (sessionSpan) {
@@ -194,7 +194,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Agent (per user prompt) ---
   pi.on("agent_start", async (_event, _ctx) => {
-    promptsCounter.add(1, { "llm.model": currentModel });
+    promptsCounter.add(1);
 
     agentSpan = tracer.startSpan(
       "agent.prompt",
@@ -220,7 +220,7 @@ export default function (pi: ExtensionAPI) {
   // --- Turn (per LLM call + tool execution) ---
   pi.on("turn_start", async (event) => {
     turnCount++;
-    turnsCounter.add(1, { "llm.model": currentModel });
+    turnsCounter.add(1);
 
     turnSpan = tracer.startSpan(
       "agent.turn",
@@ -243,6 +243,8 @@ export default function (pi: ExtensionAPI) {
       // Extract token usage from the assistant message
       // AssistantMessage has .usage with { input, output, cacheRead, cacheWrite, totalTokens }
       const msg = event.message as any;
+
+
       if (msg?.role === "assistant" && msg?.usage) {
         const inputTokens = msg.usage.input ?? 0;
         const outputTokens = msg.usage.output ?? 0;
@@ -256,9 +258,9 @@ export default function (pi: ExtensionAPI) {
         totalTokensIn += inputTokens + cacheRead + cacheWrite;
         totalTokensOut += outputTokens;
 
-        // Record token metrics
-        tokensInputCounter.add(inputTokens + cacheRead + cacheWrite, { "llm.model": currentModel });
-        tokensOutputCounter.add(outputTokens, { "llm.model": currentModel });
+        // Record token metrics (no model label to avoid series fragmentation)
+        tokensInputCounter.add(inputTokens + cacheRead + cacheWrite);
+        tokensOutputCounter.add(outputTokens);
       }
 
       turnSpan.setStatus({ code: SpanStatusCode.OK });
