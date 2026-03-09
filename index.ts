@@ -1,0 +1,373 @@
+/**
+ * Pi OTEL Telemetry Extension
+ *
+ * Exports OpenTelemetry traces AND metrics for pi coding agent sessions.
+ *
+ * Configuration via environment variables:
+ *   OTEL_EXPORTER_OTLP_ENDPOINT - OTLP endpoint (default: http://localhost:4318)
+ *   OTEL_SERVICE_NAME           - Service name (default: pi-coding-agent)
+ *   PI_OTEL_ENABLED             - Enable/disable (default: true)
+ *   PI_OTEL_DEBUG               - Log spans to console (default: false)
+ *
+ * Traces:
+ *   session (root span)
+ *   └── agent.prompt (per user prompt)
+ *       └── agent.turn (per LLM turn)
+ *           ├── tool.{name} (per tool call)
+ *           └── llm.request (LLM API call)
+ *
+ * Metrics:
+ *   pi.tokens.input        - counter, total input tokens
+ *   pi.tokens.output       - counter, total output tokens
+ *   pi.tool.calls          - counter, tool invocations (by tool.name)
+ *   pi.tool.errors         - counter, failed tool invocations (by tool.name)
+ *   pi.tool.duration       - histogram, tool execution time in ms (by tool.name)
+ *   pi.turns               - counter, LLM turns
+ *   pi.prompts             - counter, user prompts (agent starts)
+ *   pi.session.duration    - histogram, session duration in seconds
+ */
+
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+
+import { trace, context, SpanStatusCode, type Span, type Tracer } from "@opentelemetry/api";
+import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { BatchSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
+import {
+  MeterProvider,
+  PeriodicExportingMetricReader,
+  ConsoleMetricExporter,
+} from "@opentelemetry/sdk-metrics";
+import { Resource } from "@opentelemetry/resources";
+import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
+
+export default function (pi: ExtensionAPI) {
+  const enabled = process.env.PI_OTEL_ENABLED !== "false";
+  if (!enabled) return;
+
+  const debug = process.env.PI_OTEL_DEBUG === "true";
+  const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
+  const serviceName = process.env.OTEL_SERVICE_NAME || "pi-coding-agent";
+  const metricInterval = parseInt(process.env.OTEL_METRIC_EXPORT_INTERVAL || "10000", 10);
+
+  // --- Resource setup (shared by traces & metrics) ---
+  const resourceAttrs: Record<string, string> = {
+    [ATTR_SERVICE_NAME]: serviceName,
+    [ATTR_SERVICE_VERSION]: "1.0.0",
+    "pi.extension": "otel-telemetry",
+  };
+  const envAttrs = process.env.OTEL_RESOURCE_ATTRIBUTES;
+  if (envAttrs) {
+    for (const pair of envAttrs.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0) {
+        resourceAttrs[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+      }
+    }
+  }
+
+  const resource = new Resource(resourceAttrs);
+
+  // --- Trace provider ---
+  const traceProvider = new NodeTracerProvider({ resource });
+
+  traceProvider.addSpanProcessor(
+    new BatchSpanProcessor(new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }))
+  );
+  if (debug) {
+    traceProvider.addSpanProcessor(new BatchSpanProcessor(new ConsoleSpanExporter()));
+  }
+  traceProvider.register();
+
+  const tracer: Tracer = trace.getTracer("pi-otel-extension", "1.0.0");
+
+  // --- Metric provider ---
+  const metricReader = new PeriodicExportingMetricReader({
+    exporter: new OTLPMetricExporter({ url: `${endpoint}/v1/metrics` }),
+    exportIntervalMillis: metricInterval,
+  });
+
+  const readers: PeriodicExportingMetricReader[] = [metricReader];
+
+  if (debug) {
+    const debugReader = new PeriodicExportingMetricReader({
+      exporter: new ConsoleMetricExporter(),
+      exportIntervalMillis: metricInterval,
+    });
+    readers.push(debugReader);
+  }
+
+  const meterProvider = new MeterProvider({ resource, readers });
+  const meter = meterProvider.getMeter("pi-otel-extension", "1.0.0");
+
+  // --- Metrics ---
+  const tokensInputCounter = meter.createCounter("pi.tokens.input", {
+    description: "Total input tokens consumed",
+    unit: "tokens",
+  });
+  const tokensOutputCounter = meter.createCounter("pi.tokens.output", {
+    description: "Total output tokens produced",
+    unit: "tokens",
+  });
+  const toolCallsCounter = meter.createCounter("pi.tool.calls", {
+    description: "Total tool invocations",
+  });
+  const toolErrorsCounter = meter.createCounter("pi.tool.errors", {
+    description: "Total failed tool invocations",
+  });
+  const toolDurationHistogram = meter.createHistogram("pi.tool.duration", {
+    description: "Tool execution duration",
+    unit: "ms",
+  });
+  const turnsCounter = meter.createCounter("pi.turns", {
+    description: "Total LLM turns",
+  });
+  const promptsCounter = meter.createCounter("pi.prompts", {
+    description: "Total user prompts (agent starts)",
+  });
+  const sessionDurationHistogram = meter.createHistogram("pi.session.duration", {
+    description: "Session duration",
+    unit: "s",
+  });
+
+  // --- Span tracking ---
+  let sessionSpan: Span | undefined;
+  let sessionCtx = context.active();
+  let agentSpan: Span | undefined;
+  let agentCtx = context.active();
+  let turnSpan: Span | undefined;
+  let turnCtx = context.active();
+  const toolSpans = new Map<string, { span: Span; ctx: typeof agentCtx; startTime: number }>();
+
+  let turnCount = 0;
+  let totalToolCalls = 0;
+  let totalTokensIn = 0;
+  let totalTokensOut = 0;
+  let sessionStartTime = 0;
+  let currentModel = "";
+
+  // --- Session lifecycle ---
+  pi.on("session_start", async (_event, ctx) => {
+    sessionStartTime = Date.now();
+    sessionSpan = tracer.startSpan("session", {
+      attributes: {
+        "session.id": ctx.sessionManager.getSessionFile() ?? "ephemeral",
+        "session.cwd": ctx.cwd,
+      },
+    });
+    sessionCtx = trace.setSpan(context.active(), sessionSpan);
+    turnCount = 0;
+    totalToolCalls = 0;
+    totalTokensIn = 0;
+    totalTokensOut = 0;
+
+    if (debug) {
+      ctx.ui.setStatus("otel", ctx.ui.theme.fg("dim", "📡 OTEL active"));
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    // Record session duration metric
+    if (sessionStartTime > 0) {
+      const durationSec = (Date.now() - sessionStartTime) / 1000;
+      sessionDurationHistogram.record(durationSec, { "llm.model": currentModel });
+    }
+
+    if (sessionSpan) {
+      sessionSpan.setAttribute("session.turns", turnCount);
+      sessionSpan.setAttribute("session.tool_calls", totalToolCalls);
+      sessionSpan.setAttribute("session.tokens.input", totalTokensIn);
+      sessionSpan.setAttribute("session.tokens.output", totalTokensOut);
+      sessionSpan.setStatus({ code: SpanStatusCode.OK });
+      sessionSpan.end();
+      sessionSpan = undefined;
+    }
+
+    // Flush all pending data before exit
+    await meterProvider.forceFlush();
+    await traceProvider.forceFlush();
+    await meterProvider.shutdown();
+    await traceProvider.shutdown();
+  });
+
+  // --- Agent (per user prompt) ---
+  pi.on("agent_start", async (_event, _ctx) => {
+    promptsCounter.add(1, { "llm.model": currentModel });
+
+    agentSpan = tracer.startSpan(
+      "agent.prompt",
+      {
+        attributes: {
+          "agent.turn_count": 0,
+        },
+      },
+      sessionCtx
+    );
+    agentCtx = trace.setSpan(sessionCtx, agentSpan);
+  });
+
+  pi.on("agent_end", async (event) => {
+    if (agentSpan) {
+      agentSpan.setAttribute("agent.messages_count", event.messages?.length ?? 0);
+      agentSpan.setStatus({ code: SpanStatusCode.OK });
+      agentSpan.end();
+      agentSpan = undefined;
+    }
+  });
+
+  // --- Turn (per LLM call + tool execution) ---
+  pi.on("turn_start", async (event) => {
+    turnCount++;
+    turnsCounter.add(1, { "llm.model": currentModel });
+
+    turnSpan = tracer.startSpan(
+      "agent.turn",
+      {
+        attributes: {
+          "turn.index": event.turnIndex,
+          "turn.number": turnCount,
+        },
+      },
+      agentCtx
+    );
+    turnCtx = trace.setSpan(agentCtx, turnSpan);
+  });
+
+  pi.on("turn_end", async (event) => {
+    if (turnSpan) {
+      const toolResultCount = event.toolResults?.length ?? 0;
+      turnSpan.setAttribute("turn.tool_results", toolResultCount);
+
+      // Extract token usage from the assistant message if available
+      const msg = event.message as any;
+      if (msg?.usage) {
+        const inputTokens = msg.usage.inputTokens ?? 0;
+        const outputTokens = msg.usage.outputTokens ?? 0;
+        turnSpan.setAttribute("llm.usage.input_tokens", inputTokens);
+        turnSpan.setAttribute("llm.usage.output_tokens", outputTokens);
+        totalTokensIn += inputTokens;
+        totalTokensOut += outputTokens;
+
+        // Record token metrics
+        tokensInputCounter.add(inputTokens, { "llm.model": currentModel });
+        tokensOutputCounter.add(outputTokens, { "llm.model": currentModel });
+      }
+
+      turnSpan.setStatus({ code: SpanStatusCode.OK });
+      turnSpan.end();
+      turnSpan = undefined;
+    }
+  });
+
+  // --- Tool execution ---
+  pi.on("tool_execution_start", async (event) => {
+    totalToolCalls++;
+    toolCallsCounter.add(1, { "tool.name": event.toolName });
+
+    const span = tracer.startSpan(
+      `tool.${event.toolName}`,
+      {
+        attributes: {
+          "tool.name": event.toolName,
+          "tool.call_id": event.toolCallId,
+          "tool.args_summary": summarizeArgs(event.toolName, event.args),
+        },
+      },
+      turnCtx
+    );
+    const spanCtx = trace.setSpan(turnCtx, span);
+    toolSpans.set(event.toolCallId, { span, ctx: spanCtx, startTime: Date.now() });
+  });
+
+  pi.on("tool_execution_end", async (event) => {
+    const entry = toolSpans.get(event.toolCallId);
+    if (entry) {
+      const durationMs = Date.now() - entry.startTime;
+      const attrs = { "tool.name": event.toolName };
+
+      // Record tool duration metric
+      toolDurationHistogram.record(durationMs, attrs);
+
+      if (event.isError) {
+        toolErrorsCounter.add(1, attrs);
+        entry.span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: "Tool execution failed",
+        });
+      } else {
+        entry.span.setStatus({ code: SpanStatusCode.OK });
+      }
+
+      entry.span.setAttribute("tool.is_error", event.isError ?? false);
+      entry.span.setAttribute("tool.duration_ms", durationMs);
+      entry.span.end();
+      toolSpans.delete(event.toolCallId);
+    }
+  });
+
+  // --- Model selection ---
+  pi.on("model_select", async (event) => {
+    currentModel = `${event.model.provider}/${event.model.id}`;
+
+    if (sessionSpan) {
+      sessionSpan.setAttribute("llm.model", currentModel);
+
+      if (event.previousModel) {
+        const prevId = `${event.previousModel.provider}/${event.previousModel.id}`;
+        sessionSpan.addEvent("model.changed", {
+          "model.previous": prevId,
+          "model.current": currentModel,
+          "model.source": event.source,
+        });
+      }
+    }
+  });
+
+  // --- Compaction ---
+  pi.on("session_compact", async (event) => {
+    if (sessionSpan) {
+      sessionSpan.addEvent("session.compacted", {
+        "compaction.from_extension": event.fromExtension ?? false,
+      });
+    }
+  });
+
+  // --- Provider request (for timing LLM calls) ---
+  pi.on("before_provider_request", (event) => {
+    if (turnSpan) {
+      turnSpan.addEvent("llm.request", {
+        "llm.payload_size": JSON.stringify(event.payload).length,
+      });
+    }
+  });
+}
+
+/**
+ * Create a brief summary of tool arguments for span attributes.
+ * Avoids dumping large content into traces.
+ */
+function summarizeArgs(toolName: string, args: any): string {
+  if (!args) return "";
+
+  switch (toolName) {
+    case "bash":
+      return truncate(args.command ?? "", 200);
+    case "read":
+      return args.path ?? "";
+    case "write":
+      return args.path ?? "";
+    case "edit":
+      return args.path ?? "";
+    default:
+      try {
+        return truncate(JSON.stringify(args), 200);
+      } catch {
+        return "[unserializable]";
+      }
+  }
+}
+
+function truncate(str: string, maxLen: number): string {
+  return str.length > maxLen ? str.slice(0, maxLen) + "…" : str;
+}
