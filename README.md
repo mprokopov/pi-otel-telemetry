@@ -70,6 +70,14 @@ session                          (root span, entire session lifecycle)
 | `PI_OTEL_DEBUG` | `false` | Set to `true` to also log spans/metrics to console |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | Metric export interval in ms |
 
+## Grafana Dashboard
+
+A pre-built Grafana dashboard is included in [`pi-otel-telemetry.json`](pi-otel-telemetry.json). Import it into your Grafana instance to visualize pi session traces, token usage, tool call metrics, and more.
+
+![Grafana Dashboard](docs/screenshot.png)
+
+To import: **Grafana → Dashboards → Import → Upload JSON file** → select `pi-otel-telemetry.json`.
+
 ## Quick Start
 
 ### With Jaeger (local)
