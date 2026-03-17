@@ -41,6 +41,7 @@ import {
 } from "@opentelemetry/sdk-metrics";
 import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
+import { hostname } from "os";
 
 export default function (pi: ExtensionAPI) {
   const enabled = process.env.PI_OTEL_ENABLED !== "false";
@@ -69,6 +70,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   const resource = new Resource(resourceAttrs);
+
+  // --- Common metric attributes (promoted to Prometheus labels) ---
+  // Resource attributes are NOT auto-promoted by Mimir except service.name → job.
+  // To filter by user/machine in Grafana, we pass these as metric-level attributes.
+  const commonMetricAttrs: Record<string, string> = {};
+  if (resourceAttrs["user.name"]) {
+    commonMetricAttrs["user.name"] = resourceAttrs["user.name"];
+  }
+  if (resourceAttrs["environment"]) {
+    commonMetricAttrs["environment"] = resourceAttrs["environment"];
+  }
+  commonMetricAttrs["host.name"] = hostname();
 
   // --- Trace provider ---
   const traceProvider = new NodeTracerProvider({ resource });
@@ -174,7 +187,7 @@ export default function (pi: ExtensionAPI) {
     // Record session duration metric
     if (sessionStartTime > 0) {
       const durationSec = (Date.now() - sessionStartTime) / 1000;
-      sessionDurationHistogram.record(durationSec);
+      sessionDurationHistogram.record(durationSec, commonMetricAttrs);
     }
 
     if (sessionSpan) {
@@ -196,7 +209,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Agent (per user prompt) ---
   pi.on("agent_start", async (_event, _ctx) => {
-    promptsCounter.add(1);
+    promptsCounter.add(1, commonMetricAttrs);
 
     agentSpan = tracer.startSpan(
       "agent.prompt",
@@ -222,7 +235,7 @@ export default function (pi: ExtensionAPI) {
   // --- Turn (per LLM call + tool execution) ---
   pi.on("turn_start", async (event) => {
     turnCount++;
-    turnsCounter.add(1);
+    turnsCounter.add(1, commonMetricAttrs);
 
     turnSpan = tracer.startSpan(
       "agent.turn",
@@ -261,8 +274,8 @@ export default function (pi: ExtensionAPI) {
         totalTokensOut += outputTokens;
 
         // Record token metrics (no model label to avoid series fragmentation)
-        tokensInputCounter.add(inputTokens + cacheRead + cacheWrite);
-        tokensOutputCounter.add(outputTokens);
+        tokensInputCounter.add(inputTokens + cacheRead + cacheWrite, commonMetricAttrs);
+        tokensOutputCounter.add(outputTokens, commonMetricAttrs);
       }
 
       turnSpan.setStatus({ code: SpanStatusCode.OK });
@@ -274,7 +287,7 @@ export default function (pi: ExtensionAPI) {
   // --- Tool execution ---
   pi.on("tool_execution_start", async (event) => {
     totalToolCalls++;
-    toolCallsCounter.add(1, { "tool.name": event.toolName });
+    toolCallsCounter.add(1, { "tool.name": event.toolName, ...commonMetricAttrs });
 
     const span = tracer.startSpan(
       `tool.${event.toolName}`,
@@ -295,7 +308,7 @@ export default function (pi: ExtensionAPI) {
     const entry = toolSpans.get(event.toolCallId);
     if (entry) {
       const durationMs = Date.now() - entry.startTime;
-      const attrs = { "tool.name": event.toolName };
+      const attrs = { "tool.name": event.toolName, ...commonMetricAttrs };
 
       // Record tool duration metric
       toolDurationHistogram.record(durationMs, attrs);
