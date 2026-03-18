@@ -8,6 +8,8 @@
  *   OTEL_SERVICE_NAME           - Service name (default: pi-coding-agent)
  *   PI_OTEL_ENABLED             - Enable/disable (default: true)
  *   PI_OTEL_DEBUG               - Log spans to console (default: false)
+ *   PI_OTEL_USER_EMAIL          - Override user email (default: git config user.email)
+ *   PI_OTEL_USER_NAME           - Override user name (default: git config user.name)
  *
  * Traces:
  *   session (root span)
@@ -29,6 +31,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
+import { execSync } from "child_process";
+import { hostname, userInfo } from "os";
 import { trace, context, SpanStatusCode, type Span, type Tracer } from "@opentelemetry/api";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { BatchSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
@@ -53,12 +57,20 @@ export default function (pi: ExtensionAPI) {
   const metricInterval = parseInt(process.env.OTEL_METRIC_EXPORT_INTERVAL || "10000", 10);
   const metricsEndpoint = process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT || `${endpoint}/v1/metrics`;
 
+  // --- Resolve account identity ---
+  const account = resolveAccount();
+
   // --- Resource setup (shared by traces & metrics) ---
   const resourceAttrs: Record<string, string> = {
     [ATTR_SERVICE_NAME]: serviceName,
     [ATTR_SERVICE_VERSION]: "1.0.0",
     "pi.extension": "otel-telemetry",
+    "host.name": account.hostname,
+    "user.name": account.userName,
   };
+  if (account.email) resourceAttrs["user.email"] = account.email;
+  if (account.gitName) resourceAttrs["user.full_name"] = account.gitName;
+
   const envAttrs = process.env.OTEL_RESOURCE_ATTRIBUTES;
   if (envAttrs) {
     for (const pair of envAttrs.split(",")) {
@@ -170,6 +182,10 @@ export default function (pi: ExtensionAPI) {
       attributes: {
         "session.id": ctx.sessionManager.getSessionFile() ?? "ephemeral",
         "session.cwd": ctx.cwd,
+        "user.email": account.email,
+        "user.name": account.userName,
+        "user.full_name": account.gitName,
+        "host.name": account.hostname,
       },
     });
     sessionCtx = trace.setSpan(context.active(), sessionSpan);
@@ -394,4 +410,30 @@ function summarizeArgs(toolName: string, args: any): string {
 
 function truncate(str: string, maxLen: number): string {
   return str.length > maxLen ? str.slice(0, maxLen) + "…" : str;
+}
+
+/**
+ * Resolve account identity from env vars, git config, and OS.
+ * Priority: env vars > git config > OS defaults.
+ */
+function resolveAccount(): {
+  email: string;
+  gitName: string;
+  userName: string;
+  hostname: string;
+} {
+  const email = process.env.PI_OTEL_USER_EMAIL || gitConfig("user.email") || "";
+  const gitName = process.env.PI_OTEL_USER_NAME || gitConfig("user.name") || "";
+  const userName = userInfo().username;
+  const host = hostname();
+
+  return { email, gitName, userName, hostname: host };
+}
+
+function gitConfig(key: string): string {
+  try {
+    return execSync(`git config --global ${key}`, { encoding: "utf-8", timeout: 2000 }).trim();
+  } catch {
+    return "";
+  }
 }
