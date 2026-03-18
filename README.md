@@ -20,14 +20,27 @@ session                          (root span, entire session lifecycle)
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `pi.tokens.input` | Counter | `llm.model` | Total input tokens consumed |
-| `pi.tokens.output` | Counter | `llm.model` | Total output tokens produced |
+| `pi.tokens.input` | Counter | — | Total input tokens consumed |
+| `pi.tokens.output` | Counter | — | Total output tokens produced |
 | `pi.tool.calls` | Counter | `tool.name` | Total tool invocations |
 | `pi.tool.errors` | Counter | `tool.name` | Total failed tool invocations |
 | `pi.tool.duration` | Histogram (ms) | `tool.name` | Tool execution time |
-| `pi.turns` | Counter | `llm.model` | Total LLM turns |
-| `pi.prompts` | Counter | `llm.model` | Total user prompts |
-| `pi.session.duration` | Histogram (s) | `llm.model` | Session duration |
+| `pi.turns` | Counter | — | Total LLM turns |
+| `pi.prompts` | Counter | — | Total user prompts |
+| `pi.session.duration` | Histogram (s) | — | Session duration |
+
+## Account Identity
+
+The extension automatically resolves user identity at startup and attaches it to all traces and metrics as OTEL resource attributes:
+
+| Resource Attribute | Source | Description |
+|-------------------|--------|-------------|
+| `user.email` | `PI_OTEL_USER_EMAIL` or `git config user.email` | User email |
+| `user.full_name` | `PI_OTEL_USER_NAME` or `git config user.name` | User display name |
+| `user.name` | OS `userInfo().username` | OS username |
+| `host.name` | OS `hostname()` | Machine hostname |
+
+These propagate to every metric data point and trace span, enabling per-user filtering in Grafana/Tempo without high-cardinality metric labels.
 
 ## Trace Attributes
 
@@ -41,6 +54,10 @@ session                          (root span, entire session lifecycle)
 | `session.tokens.input` | Total input tokens |
 | `session.tokens.output` | Total output tokens |
 | `llm.model` | Current model (provider/id) |
+| `user.email` | User email (from git config or env) |
+| `user.name` | OS username |
+| `user.full_name` | User display name (from git config or env) |
+| `host.name` | Machine hostname |
 
 ### Turn span
 | Attribute | Description |
@@ -69,6 +86,8 @@ session                          (root span, entire session lifecycle)
 | `PI_OTEL_ENABLED` | `true` | Set to `false` to disable |
 | `PI_OTEL_DEBUG` | `false` | Set to `true` to also log spans/metrics to console |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | Metric export interval in ms |
+| `PI_OTEL_USER_EMAIL` | `git config user.email` | Override user email |
+| `PI_OTEL_USER_NAME` | `git config user.name` | Override user display name |
 
 ## Grafana Dashboard
 
