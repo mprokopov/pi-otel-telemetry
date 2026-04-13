@@ -4,12 +4,14 @@
  * Exports OpenTelemetry traces AND metrics for pi coding agent sessions.
  *
  * Configuration via environment variables:
- *   OTEL_EXPORTER_OTLP_ENDPOINT - OTLP endpoint (default: http://localhost:4318)
- *   OTEL_SERVICE_NAME           - Service name (default: pi-coding-agent)
- *   PI_OTEL_ENABLED             - Enable/disable (default: true)
- *   PI_OTEL_DEBUG               - Log spans to console (default: false)
- *   PI_OTEL_USER_EMAIL          - Override user email (default: git config user.email)
- *   PI_OTEL_USER_NAME           - Override user name (default: git config user.name)
+ *   OTEL_EXPORTER_OTLP_ENDPOINT         - Base OTLP HTTP endpoint (default: http://localhost:4318)
+ *   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  - Trace endpoint override
+ *   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT - Metrics endpoint override
+ *   OTEL_SERVICE_NAME                   - Service name (default: pi-coding-agent)
+ *   PI_OTEL_ENABLED                     - Enable/disable (default: true)
+ *   PI_OTEL_DEBUG                       - Log spans to console (default: false)
+ *   PI_OTEL_USER_EMAIL                  - Override user email (default: git config user.email)
+ *   PI_OTEL_USER_NAME                   - Override user name (default: git config user.name)
  *
  * Traces:
  *   session (root span)
@@ -52,9 +54,16 @@ export default function (pi: ExtensionAPI) {
 
   const debug = process.env.PI_OTEL_DEBUG === "true";
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
+  const tracesEndpoint = resolveOtlpHttpEndpoint(
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || endpoint,
+    "traces"
+  );
   const serviceName = process.env.OTEL_SERVICE_NAME || "pi-coding-agent";
   const metricInterval = parseInt(process.env.OTEL_METRIC_EXPORT_INTERVAL || "10000", 10);
-  const metricsEndpoint = process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT || `${endpoint}/v1/metrics`;
+  const metricsEndpoint = resolveOtlpHttpEndpoint(
+    process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT || endpoint,
+    "metrics"
+  );
 
   // --- Resolve account identity ---
   const account = resolveAccount();
@@ -98,7 +107,7 @@ export default function (pi: ExtensionAPI) {
   const traceProvider = new NodeTracerProvider({ resource });
 
   traceProvider.addSpanProcessor(
-    new BatchSpanProcessor(new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }))
+    new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint }))
   );
   if (debug) {
     traceProvider.addSpanProcessor(new BatchSpanProcessor(new ConsoleSpanExporter()));
@@ -198,7 +207,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     // Record session duration metric
     if (sessionStartTime > 0) {
       const durationSec = (Date.now() - sessionStartTime) / 1000;
@@ -215,11 +224,24 @@ export default function (pi: ExtensionAPI) {
       sessionSpan = undefined;
     }
 
-    // Flush all pending data before exit
-    await meterProvider.forceFlush();
-    await traceProvider.forceFlush();
-    await meterProvider.shutdown();
-    await traceProvider.shutdown();
+    // Flush all pending data before exit. Export failures should not break pi.
+    for (const [label, op] of [
+      ["metrics forceFlush", () => meterProvider.forceFlush()],
+      ["traces forceFlush", () => traceProvider.forceFlush()],
+      ["metrics shutdown", () => meterProvider.shutdown()],
+      ["traces shutdown", () => traceProvider.shutdown()],
+    ] as const) {
+      try {
+        await op();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (debug) {
+          ctx.ui.notify(`OTEL ${label} failed: ${message}`, "warning");
+        } else {
+          console.error(`[pi-otel-telemetry] ${label} failed: ${message}`);
+        }
+      }
+    }
   });
 
   // --- Agent (per user prompt) ---
@@ -435,4 +457,11 @@ function gitConfig(key: string): string {
   } catch {
     return "";
   }
+}
+
+function resolveOtlpHttpEndpoint(endpoint: string, signal: "traces" | "metrics"): string {
+  const trimmed = endpoint.replace(/\/+$/, "");
+  if (trimmed.endsWith(`/v1/${signal}`)) return trimmed;
+  if (trimmed.endsWith("/v1/traces") || trimmed.endsWith("/v1/metrics")) return trimmed;
+  return `${trimmed}/v1/${signal}`;
 }

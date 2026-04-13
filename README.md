@@ -81,7 +81,9 @@ These propagate to every metric data point and trace span, enabling per-user fil
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP HTTP endpoint |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | Base OTLP HTTP endpoint. `/v1/traces` and `/v1/metrics` are appended automatically unless per-signal endpoints are set. |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | Explicit OTLP HTTP traces endpoint override |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | Explicit OTLP HTTP metrics endpoint override |
 | `OTEL_SERVICE_NAME` | `pi-coding-agent` | Service name in traces |
 | `PI_OTEL_ENABLED` | `true` | Set to `false` to disable |
 | `PI_OTEL_DEBUG` | `false` | Set to `true` to also log spans/metrics to console |
@@ -116,10 +118,24 @@ pi
 open http://localhost:16686
 ```
 
-### With Grafana Tempo
+### With Grafana Tempo / Alloy
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318 pi
+```
+
+If your collector exposes OTLP HTTP on a non-default port, point the base endpoint at that port:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://alloy.it-expert.com.ua:14318 pi
+```
+
+If traces and metrics need different destinations, use per-signal overrides:
+
+```bash
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://alloy.it-expert.com.ua:14318/v1/traces \
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://alloy.it-expert.com.ua:14318/v1/metrics \
+pi
 ```
 
 ### Debug mode (console output)
@@ -136,11 +152,17 @@ PI_OTEL_ENABLED=false pi
 
 ## Installation
 
-Already installed at `~/.pi/agent/extensions/otel-telemetry/`. The extension is auto-discovered by pi.
-
-To reinstall dependencies:
+Install with:
 
 ```bash
-cd ~/.pi/agent/extensions/otel-telemetry
+pi install git:github.com/mprokopov/pi-otel-telemetry
+```
+
+The package is loaded by pi from `~/.pi/agent/git/github.com/mprokopov/pi-otel-telemetry`.
+
+To reinstall dependencies manually:
+
+```bash
+cd ~/.pi/agent/git/github.com/mprokopov/pi-otel-telemetry
 npm install
 ```
