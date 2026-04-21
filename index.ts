@@ -12,6 +12,7 @@
  *   PI_OTEL_DEBUG                       - Log spans to console (default: false)
  *   PI_OTEL_USER_EMAIL                  - Override user email (default: git config user.email)
  *   PI_OTEL_USER_NAME                   - Override user name (default: git config user.name)
+ *   TRACEPARENT                         - W3C traceparent header to link the session span to an external trace
  *
  * Traces:
  *   session (root span)
@@ -35,7 +36,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 
 import { execSync } from "child_process";
 import { hostname, userInfo } from "os";
-import { trace, context, SpanStatusCode, type Span, type Tracer } from "@opentelemetry/api";
+import { trace, context, SpanStatusCode, TraceFlags, type Span, type Tracer, type SpanContext } from "@opentelemetry/api";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { BatchSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
@@ -186,6 +187,18 @@ export default function (pi: ExtensionAPI) {
   // --- Session lifecycle ---
   pi.on("session_start", async (_event, ctx) => {
     sessionStartTime = Date.now();
+
+    // If a W3C traceparent is present, make the session span a child of that
+    // remote span so pi traces nest inside the parent trace.
+    let rootCtx = context.active();
+    const traceparent = process.env.TRACEPARENT;
+    if (traceparent) {
+      const remoteSpanCtx = parseTraceparent(traceparent);
+      if (remoteSpanCtx) {
+        rootCtx = trace.setSpanContext(context.active(), remoteSpanCtx);
+      }
+    }
+
     sessionSpan = tracer.startSpan("session", {
       attributes: {
         "session.id": ctx.sessionManager.getSessionFile() ?? "ephemeral",
@@ -195,8 +208,8 @@ export default function (pi: ExtensionAPI) {
         "user.full_name": account.gitName,
         "host.name": account.hostname,
       },
-    });
-    sessionCtx = trace.setSpan(context.active(), sessionSpan);
+    }, rootCtx);
+    sessionCtx = trace.setSpan(rootCtx, sessionSpan);
     turnCount = 0;
     totalToolCalls = 0;
     totalTokensIn = 0;
@@ -457,6 +470,28 @@ function gitConfig(key: string): string {
   } catch {
     return "";
   }
+}
+
+/**
+ * Parse a W3C traceparent header into an OTel SpanContext.
+ * Format: 00-{traceId(32hex)}-{spanId(16hex)}-{flags(2hex)}
+ * Returns undefined if the header is missing or malformed.
+ */
+function parseTraceparent(traceparent: string): SpanContext | undefined {
+  if (!traceparent) return undefined;
+  const parts = traceparent.trim().split("-");
+  if (parts.length !== 4) return undefined;
+  const [version, traceId, spanId, flags] = parts;
+  if (version !== "00") return undefined;
+  if (traceId.length !== 32 || spanId.length !== 16) return undefined;
+  if (!/^[0-9a-f]+$/i.test(traceId) || !/^[0-9a-f]+$/i.test(spanId)) return undefined;
+  const traceFlags = parseInt(flags, 16);
+  return {
+    traceId: traceId.toLowerCase(),
+    spanId: spanId.toLowerCase(),
+    traceFlags: isNaN(traceFlags) ? TraceFlags.NONE : traceFlags,
+    isRemote: true,
+  };
 }
 
 function resolveOtlpHttpEndpoint(endpoint: string, signal: "traces" | "metrics"): string {

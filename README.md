@@ -90,6 +90,23 @@ These propagate to every metric data point and trace span, enabling per-user fil
 | `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | Metric export interval in ms |
 | `PI_OTEL_USER_EMAIL` | `git config user.email` | Override user email |
 | `PI_OTEL_USER_NAME` | `git config user.name` | Override user display name |
+| `TRACEPARENT` | — | W3C traceparent header (`00-{traceId}-{spanId}-{flags}`) to attach the session span to an existing trace |
+
+## Trace Context Propagation
+
+If a `TRACEPARENT` environment variable is set (W3C Trace Context format), the `session` span is created as a child of the remote span it identifies. All child spans inherit the same trace ID, so the entire pi session appears nested inside the parent trace:
+
+```
+external trace
+└── remote span (from TRACEPARENT)
+    └── session                    ← pi root span
+        └── agent.prompt
+            └── agent.turn
+                ├── tool.bash
+                └── tool.read
+```
+
+This is useful when pi runs as part of a larger automated workflow and you want its traces to appear inline with the rest of that workflow's trace.
 
 ## Grafana Dashboard
 
