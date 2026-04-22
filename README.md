@@ -84,10 +84,14 @@ These propagate to every metric data point and trace span, enabling per-user fil
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | Base OTLP HTTP endpoint. `/v1/traces` and `/v1/metrics` are appended automatically unless per-signal endpoints are set. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | — | Explicit OTLP HTTP traces endpoint override |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | — | Explicit OTLP HTTP metrics endpoint override |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `1500` | OTLP export timeout in ms (applies to both traces and metrics) |
+| `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` | — | OTLP traces export timeout override in ms |
+| `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` | — | OTLP metrics export timeout override in ms |
+| `OTEL_BSP_EXPORT_TIMEOUT` | `1500` | BatchSpanProcessor export timeout in ms |
+| `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | Metric export interval in ms |
 | `OTEL_SERVICE_NAME` | `pi-coding-agent` | Service name in traces |
 | `PI_OTEL_ENABLED` | `true` | Set to `false` to disable |
 | `PI_OTEL_DEBUG` | `false` | Set to `true` to also log spans/metrics to console |
-| `OTEL_METRIC_EXPORT_INTERVAL` | `10000` | Metric export interval in ms |
 | `PI_OTEL_USER_EMAIL` | `git config user.email` | Override user email |
 | `PI_OTEL_USER_NAME` | `git config user.name` | Override user display name |
 
