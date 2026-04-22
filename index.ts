@@ -7,6 +7,11 @@
  *   OTEL_EXPORTER_OTLP_ENDPOINT         - Base OTLP HTTP endpoint (default: http://localhost:4318)
  *   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT  - Trace endpoint override
  *   OTEL_EXPORTER_OTLP_METRICS_ENDPOINT - Metrics endpoint override
+ *   OTEL_EXPORTER_OTLP_TIMEOUT          - OTLP export timeout in ms (default: 1500)
+ *   OTEL_EXPORTER_OTLP_TRACES_TIMEOUT   - Traces export timeout override in ms
+ *   OTEL_EXPORTER_OTLP_METRICS_TIMEOUT  - Metrics export timeout override in ms
+ *   OTEL_BSP_EXPORT_TIMEOUT             - BatchSpanProcessor export timeout in ms (default: 1500)
+ *   OTEL_METRIC_EXPORT_INTERVAL         - Metric export interval in ms (default: 10000)
  *   OTEL_SERVICE_NAME                   - Service name (default: pi-coding-agent)
  *   PI_OTEL_ENABLED                     - Enable/disable (default: true)
  *   PI_OTEL_DEBUG                       - Log spans to console (default: false)
@@ -32,25 +37,27 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { Span, Tracer } from "@opentelemetry/api";
 
 import { execSync } from "child_process";
 import { hostname, userInfo } from "os";
-import { trace, context, SpanStatusCode, type Span, type Tracer } from "@opentelemetry/api";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import { BatchSpanProcessor, ConsoleSpanExporter } from "@opentelemetry/sdk-trace-base";
-import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
-import {
-  MeterProvider,
-  PeriodicExportingMetricReader,
-  ConsoleMetricExporter,
-} from "@opentelemetry/sdk-metrics";
-import { Resource } from "@opentelemetry/resources";
-import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from "@opentelemetry/semantic-conventions";
 
 export default function (pi: ExtensionAPI) {
   const enabled = process.env.PI_OTEL_ENABLED !== "false";
   if (!enabled) return;
+
+  // Lazy-load the OTel SDK only when the extension is enabled.
+  // All @opentelemetry/* packages together take several seconds to require(), so loading
+  // them at module load time (top-level imports) would slow down every pi
+  // startup and /new even when the extension is disabled.
+  const { trace, context, SpanStatusCode } = require("@opentelemetry/api") as typeof import("@opentelemetry/api");
+  const { NodeTracerProvider } = require("@opentelemetry/sdk-trace-node") as typeof import("@opentelemetry/sdk-trace-node");
+  const { BatchSpanProcessor, ConsoleSpanExporter } = require("@opentelemetry/sdk-trace-base") as typeof import("@opentelemetry/sdk-trace-base");
+  const { OTLPTraceExporter } = require("@opentelemetry/exporter-trace-otlp-http") as typeof import("@opentelemetry/exporter-trace-otlp-http");
+  const { OTLPMetricExporter } = require("@opentelemetry/exporter-metrics-otlp-http") as typeof import("@opentelemetry/exporter-metrics-otlp-http");
+  const { MeterProvider, PeriodicExportingMetricReader, ConsoleMetricExporter } = require("@opentelemetry/sdk-metrics") as typeof import("@opentelemetry/sdk-metrics");
+  const { Resource } = require("@opentelemetry/resources") as typeof import("@opentelemetry/resources");
+  const { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } = require("@opentelemetry/semantic-conventions") as typeof import("@opentelemetry/semantic-conventions");
 
   const debug = process.env.PI_OTEL_DEBUG === "true";
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "http://localhost:4318";
@@ -64,6 +71,20 @@ export default function (pi: ExtensionAPI) {
     process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT || endpoint,
     "metrics"
   );
+
+  // Use aggressive export timeouts so that flush/shutdown stay fast when
+  // the OTLP collector is unreachable.  The standard OTEL_* env vars take
+  // precedence, falling back to 1500 ms — plenty for a local or network
+  // export, yet short enough to keep the interactive TUI snappy.
+  const DEFAULT_EXPORT_TIMEOUT_MILLIS = 1500;
+  const exporterTimeout = parseInt(
+    process.env.OTEL_EXPORTER_OTLP_TIMEOUT || String(DEFAULT_EXPORT_TIMEOUT_MILLIS), 10);
+  const tracesExporterTimeout = parseInt(
+    process.env.OTEL_EXPORTER_OTLP_TRACES_TIMEOUT || String(exporterTimeout), 10);
+  const metricsExporterTimeout = parseInt(
+    process.env.OTEL_EXPORTER_OTLP_METRICS_TIMEOUT || String(exporterTimeout), 10);
+  const bspExportTimeout = parseInt(
+    process.env.OTEL_BSP_EXPORT_TIMEOUT || String(DEFAULT_EXPORT_TIMEOUT_MILLIS), 10);
 
   // --- Resolve account identity ---
   const account = resolveAccount();
@@ -107,7 +128,7 @@ export default function (pi: ExtensionAPI) {
   const traceProvider = new NodeTracerProvider({ resource });
 
   traceProvider.addSpanProcessor(
-    new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint }))
+    new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesEndpoint, timeoutMillis: tracesExporterTimeout }), { exportTimeoutMillis: bspExportTimeout })
   );
   if (debug) {
     traceProvider.addSpanProcessor(new BatchSpanProcessor(new ConsoleSpanExporter()));
@@ -120,8 +141,9 @@ export default function (pi: ExtensionAPI) {
 
   // --- Metric provider ---
   const metricReader = new PeriodicExportingMetricReader({
-    exporter: new OTLPMetricExporter({ url: metricsEndpoint }),
+    exporter: new OTLPMetricExporter({ url: metricsEndpoint, timeoutMillis: metricsExporterTimeout }),
     exportIntervalMillis: metricInterval,
+    exportTimeoutMillis: metricsExporterTimeout,
   });
 
   const readers: PeriodicExportingMetricReader[] = [metricReader];
@@ -224,21 +246,20 @@ export default function (pi: ExtensionAPI) {
       sessionSpan = undefined;
     }
 
-    // Flush all pending data before exit. Export failures should not break pi.
-    for (const [label, op] of [
-      ["metrics forceFlush", () => meterProvider.forceFlush()],
-      ["traces forceFlush", () => traceProvider.forceFlush()],
-      ["metrics shutdown", () => meterProvider.shutdown()],
-      ["traces shutdown", () => traceProvider.shutdown()],
-    ] as const) {
-      try {
-        await op();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+    // Flush and shut down both providers in parallel.
+    // Note: shutdown() already calls forceFlush() internally, so no need to
+    // call it explicitly. Export failures should not break pi.
+    const results = await Promise.allSettled([
+      meterProvider.shutdown(),
+      traceProvider.shutdown(),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        const message = result.reason instanceof Error
+          ? (result.reason.message || result.reason.name)
+          : String(result.reason ?? "unknown error");
         if (debug) {
-          ctx.ui.notify(`OTEL ${label} failed: ${message}`, "warning");
-        } else {
-          console.error(`[pi-otel-telemetry] ${label} failed: ${message}`);
+          ctx.ui.notify(`OTEL shutdown failed: ${message}`, "warning");
         }
       }
     }
